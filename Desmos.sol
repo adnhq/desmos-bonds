@@ -78,6 +78,7 @@ contract Desmos is ERC1155, AccessControl {
     event BondsRedeemed(uint bondId, uint purchaseIndex, uint amount, uint ethReceived, uint redeemTimestamp, address indexed buyer);
     event BondSupplyUpdated(uint bondId, uint oldSupply, uint newSupply, address indexed issuer);
     event TreasuryUpdated(address oldTreasury, address newTreasury);
+    event FundsWithdrawn(uint amountEth, uint timestamp, address indexed admin);
 
     /**
      * @dev Initializes `baseURI` and grants `DEFAULT_ADMIN_ROLE` and `ISSUER_ROLE` to the deployer.
@@ -358,6 +359,8 @@ contract Desmos is ERC1155, AccessControl {
         if(address(this).balance - amountEth < getCurrentReserve()) _revert(ExceedsMinimumReserve.selector);
 
         _transferEth(treasury, amountEth);
+
+        emit FundsWithdrawn(amountEth, block.timestamp, msg.sender);
     }
 
     // ============================================================
