@@ -8,7 +8,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /**
  * @title Desmos NFT Bonds
  * @author adnhq (@Hawkyne)
- * @notice Desmos uses ERC1155 NFTs to represent bonds with different specifications and supplies. 
+ * @notice Desmos uses NFTs to represent bonds with different specifications and supplies. 
  */
 contract Desmos is ERC1155, AccessControl {
     /**
@@ -31,6 +31,10 @@ contract Desmos is ERC1155, AccessControl {
      */    
     error UnissuedBondProvided();
 
+    /**
+     * @dev Amount provided is greater than the caller's balance of bonds.
+     */    
+    error AmountExceedsBalance();
     /**
      * @dev Bonds can not be transferred to a different address.
      */    
@@ -88,6 +92,12 @@ contract Desmos is ERC1155, AccessControl {
         _grantRole(ISSUER_ROLE, msg.sender);
     }
 
+    // To receive Ether
+    receive() external payable {}
+
+    /// Functions with restricted access are marked as payable to save some gas based on the assumption that the functions will be called appropriately. 
+
+
     /**
      * @notice Issues specified amount of a new bond.
      * @param _parValue Par value for the bond. 
@@ -101,8 +111,14 @@ contract Desmos is ERC1155, AccessControl {
      * - caller must have `ISSUER_ROLE`.
      * - value of arguments must be non-zero.
      */
-    function issueBonds(uint _parValue, uint _price, uint _couponRate, uint _maturityPeriod, uint _payoutInterval, uint _supply) 
-    external 
+    function issueBonds(
+        uint _parValue, 
+        uint _price, 
+        uint _couponRate, 
+        uint _maturityPeriod, 
+        uint _payoutInterval, 
+        uint _supply
+    ) external payable 
     onlyRole(ISSUER_ROLE) 
     {
         if(_parValue == 0 || _price == 0 || _couponRate == 0 || _maturityPeriod == 0 || _payoutInterval == 0 || _supply == 0) 
@@ -132,7 +148,7 @@ contract Desmos is ERC1155, AccessControl {
      * - caller must have `ISSUER_ROLE`.
      * - `bondId` must have been issued.
      */
-    function setSupply(uint bondId, uint newSupply) external onlyRole(ISSUER_ROLE) {
+    function setSupply(uint bondId, uint newSupply) external payable onlyRole(ISSUER_ROLE) {
         if(bondId >= _counter) _revert(UnissuedBondProvided.selector);
 
         uint oldSupply = bonds[bondId].supply;
@@ -215,11 +231,11 @@ contract Desmos is ERC1155, AccessControl {
      * along with the par value of the bonds.
      */
     function redeemBond(uint bondId, uint _amount, uint purchaseIndex) external {
-        purchases[msg.sender][bondId][purchaseIndex].amount -= _amount; // will underflow and revert if amount higher than balance is provided
-
-        
-        Bond memory bond = bonds[bondId];  
         Purchase memory purchase = purchases[msg.sender][bondId][purchaseIndex];
+        if(_amount > purchase.amount) _revert(AmountExceedsBalance.selector);
+
+        Bond memory bond = bonds[bondId];  
+        
         (uint accruedInterest, uint updatedTimestamp) = _getInterest(bond, purchase);
         uint totalPrincipal = bond.parValue * _amount;
         uint amountEth = totalPrincipal + accruedInterest;
@@ -227,6 +243,7 @@ contract Desmos is ERC1155, AccessControl {
         purchases[msg.sender][bondId][purchaseIndex].lastInterestPaymentTimestamp = updatedTimestamp;
 
         unchecked {
+            purchases[msg.sender][bondId][purchaseIndex].amount -= _amount; 
             totalFunds -= totalPrincipal;
         }
 
@@ -236,6 +253,60 @@ contract Desmos is ERC1155, AccessControl {
         emit BondsRedeemed(bondId, purchaseIndex, _amount, amountEth, block.timestamp, msg.sender);
     }
 
+    // ============================================================
+    //                    DEFAULT_ADMIN ACCESS
+    // ============================================================
+
+    /**
+     * @notice Set base URI for collection.
+     * @param baseURI base URI of the collection.
+     *
+     * Requirements-
+     *
+     * - caller must have the `DEFAULT_ADMIN_ROLE`.
+     */
+    function setBaseURI(string calldata baseURI) external payable onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setURI(baseURI);
+    }
+
+    /**
+     * @notice Updates treasury address.
+     * @param newTreasury Address of new treasury wallet.
+     *
+     * Requirements-
+     *
+     * - caller must have the `DEFAULT_ADMIN_ROLE`.
+     * - `newTreasury` should not be the zero address.
+     */
+    function setTreasury(address newTreasury) external payable onlyRole(DEFAULT_ADMIN_ROLE) {
+        if(newTreasury == address(0)) _revert(InvalidArgumentProvided.selector);
+        address oldTreasury = treasury;
+        treasury = newTreasury;
+
+        emit TreasuryUpdated(oldTreasury, newTreasury);
+    }   
+
+    /**
+     * @notice Transfers funds to treasury.
+     * @param amountEth Amount of ether to transfer.
+     *
+     * Requirements-
+     *
+     * - caller must have DEFAULT_ADMIN_ROLE.
+     *
+     */
+    function withdrawFunds(uint amountEth) external payable onlyRole(DEFAULT_ADMIN_ROLE) {
+        if(address(this).balance - amountEth < getCurrentReserve()) _revert(ExceedsMinimumReserve.selector);
+
+        _transferEth(treasury, amountEth);
+
+        emit FundsWithdrawn(amountEth, block.timestamp, msg.sender);
+    }
+
+    // ============================================================
+    //                      GETTER FUNCTIONS
+    // ============================================================
+
     /**
      * @notice Returns the claimable accrued interest on a specific purchase of bonds.
      * @param bondholder Address of the bondholder.
@@ -243,7 +314,7 @@ contract Desmos is ERC1155, AccessControl {
      * @param purchaseIndex Index of bond purchase to calculate interest for.
      * @return accruedInterest The amount of accrued claimable interest in Eth.
      */
-    function getAccruedInterest(address bondholder, uint bondId, uint purchaseIndex) public view returns (uint accruedInterest) {
+    function getAccruedInterest(address bondholder, uint bondId, uint purchaseIndex) external view returns (uint accruedInterest) {
         Bond memory bond = bonds[bondId];
         Purchase memory purchase = purchases[bondholder][bondId][purchaseIndex];
 
@@ -271,7 +342,7 @@ contract Desmos is ERC1155, AccessControl {
     /**
      * @notice Returns total number of bonds issued.
      */
-    function bondsIssued() external view returns (uint) {
+    function getTotalBondsIssued() external view returns (uint) {
         return _counter;
     }
 
@@ -279,89 +350,41 @@ contract Desmos is ERC1155, AccessControl {
      * @notice Returns current Eth reserve.
      */
     function getCurrentReserve() public view returns (uint) {
-        return (totalFunds * MIN_RESERVE_RATIO) / 100;
+        return totalFunds >> 1; // Divides totalFunds by 2, that is, (totalFunds * MIN_RESERVE_RATIO) / 100
     }
 
     // Overrides to disable bond transfers.
     function safeTransferFrom(
-        address from,
-        address to,
-        uint256 id,
-        uint256 amount,
-        bytes memory data
+        address,
+        address,
+        uint256,
+        uint256,
+        bytes memory 
     ) public virtual override {
-        from; 
-        to;
-        id; 
-        amount;
-        data;
         _revert(BondsAreNonTransferrable.selector);
     }
 
     function safeBatchTransferFrom(
-        address from,
-        address to,
-        uint256[] memory ids,
-        uint256[] memory values,
-        bytes memory data
+        address,
+        address,
+        uint256[] memory,
+        uint256[] memory,
+        bytes memory
     ) public virtual override {
-        from;
-        to;
-        ids;
-        values;
-        data;
         _revert(BondsAreNonTransferrable.selector);
     }
 
-    // ============================================================
-    //                    DEFAULT_ADMIN ACCESS
-    // ============================================================
-
-    /**
-     * @notice Set base URI for collection.
-     * @param baseURI base URI of the collection.
-     *
-     * Requirements-
-     *
-     * - caller must have the `DEFAULT_ADMIN_ROLE`.
-     */
-    function setBaseURI(string calldata baseURI) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setURI(baseURI);
+    // Override required by solidity
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC1155, AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 
-    /**
-     * @notice Updates treasury address.
-     * @param newTreasury Address of new treasury wallet.
-     *
-     * Requirements-
-     *
-     * - caller must have the `DEFAULT_ADMIN_ROLE`.
-     * - `newTreasury` should not be the zero address.
-     */
-    function setTreasury(address newTreasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if(newTreasury == address(0)) _revert(InvalidArgumentProvided.selector);
-        address oldTreasury = treasury;
-        treasury = newTreasury;
-
-        emit TreasuryUpdated(oldTreasury, newTreasury);
-    }   
-
-    /**
-     * @notice Transfers funds to treasury.
-     * @param amountEth Amount of ether to transfer.
-     *
-     * Requirements-
-     *
-     * - caller must have DEFAULT_ADMIN_ROLE.
-     *
-     */
-    function withdrawFunds(uint amountEth) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if(address(this).balance - amountEth < getCurrentReserve()) _revert(ExceedsMinimumReserve.selector);
-
-        _transferEth(treasury, amountEth);
-
-        emit FundsWithdrawn(amountEth, block.timestamp, msg.sender);
-    }
+    
 
     // ============================================================
     //                          HELPERS
@@ -375,7 +398,7 @@ contract Desmos is ERC1155, AccessControl {
         if(payouts == 0) return (0, 0);
         
         uint payoutTimeElapsed = bond.payoutInterval * payouts;
-        uint accruedInterestPerToken = (bond.parValue * bond.couponRate * payoutTimeElapsed) / (1000 * 365 days);
+        uint accruedInterestPerToken = (bond.parValue * bond.couponRate * payoutTimeElapsed) / 31536000000; // Divide by 365 days * 1000
 
         return (
             accruedInterestPerToken * purchase.amount, 
@@ -405,19 +428,5 @@ contract Desmos is ERC1155, AccessControl {
         }
 
         if(!success) _revert(EthTransferFailed.selector);
-    }
-
-    // To receive Eth
-    receive() external payable {}
-
-    // The following functions are overrides required by Solidity.
-    
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        override(ERC1155, AccessControl)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
     }
 }
